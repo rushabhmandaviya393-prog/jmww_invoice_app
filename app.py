@@ -1,12 +1,17 @@
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
+import io
 import os
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="JAY MATAJI WELDING WORKS - Invoicing", layout="wide")
 
-# --- CONSTANTS & COMPANY PROFILE ---
+# --- COMPANY PROFILE & CONSTANTS ---
 COMPANY_NAME = "JAY MATAJI WELDING WORKS"
 COMPANY_GSTIN = "24BWUPM5424M1ZW"
 COMPANY_PAN = "BWUPM5424M"
@@ -20,7 +25,6 @@ DB_FILE = "invoice_records.csv"
 
 # --- HELPER FUNCTIONS ---
 def num_to_words(num):
-    # Basic integer to words converter for INR
     units = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
              "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"]
     tens = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"]
@@ -71,11 +75,142 @@ def save_record(record):
     df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
     df.to_csv(DB_FILE, index=False)
 
-# --- NAVIGATION ---
+def generate_pdf_invoice(inv_data):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=25, leftMargin=25, topMargin=20, bottomMargin=20)
+    story = []
+    styles = getSampleStyleSheet()
+    
+    normal_style = ParagraphStyle('NormalSmall', parent=styles['Normal'], fontSize=8, leading=10)
+    bold_style = ParagraphStyle('BoldSmall', parent=styles['Normal'], fontSize=8, leading=10, fontName='Helvetica-Bold')
+    title_style = ParagraphStyle('TitleStyle', parent=styles['Normal'], fontSize=11, leading=13, fontName='Helvetica-Bold', alignment=1)
+
+    # 1. Header image or fallback text
+    if os.path.exists("header.png"):
+        story.append(RLImage("header.png", width=550, height=85))
+    else:
+        story.append(Paragraph(f"<b>{COMPANY_NAME}</b>", title_style))
+        story.append(Paragraph(f"{COMPANY_ADDRESS}<br/>Phone: {COMPANY_PHONES} | Email: {COMPANY_EMAIL}", normal_style))
+    story.append(Spacer(1, 8))
+
+    story.append(Paragraph("<b>TAX INVOICE (ORIGINAL)</b>", title_style))
+    story.append(Spacer(1, 6))
+
+    # 2. Party & Invoice Meta Information Table
+    cust_info = f"""<b>To:</b><br/>
+    <b>{inv_data['cust_name']}</b><br/>
+    {inv_data['cust_address']}<br/>
+    <b>State:</b> {inv_data['state_name']} | <b>Code:</b> {inv_data['state_code']}<br/>
+    <b>Mo. No.:</b> {inv_data['cust_mobile']}<br/>
+    <b>Party's GSTIN:</b> {inv_data['cust_gstin']}<br/>
+    <b>Party's PAN:</b> {inv_data['cust_pan']}
+    """
+
+    inv_meta = f"""<b>INVOICE NO:</b> {inv_data['inv_no']}<br/>
+    <b>Date:</b> {inv_data['bill_date']}<br/>
+    <b>Term:</b> {inv_data['term_days']} Days (Due: {inv_data['due_date']})<br/>
+    <b>TRANSPORT:</b> {inv_data['transport']}<br/>
+    <b>LR. NO.:</b> {inv_data['lr_no']} | <b>LR. DATE:</b> {inv_data['lr_date']}<br/>
+    <b>VEHICLE NO.:</b> {inv_data['vehicle_no']} | <b>CASES:</b> {inv_data['cases']}
+    """
+
+    meta_table = Table([
+        [Paragraph(cust_info, normal_style), Paragraph(inv_meta, normal_style)]
+    ], colWidths=[280, 280])
+    
+    meta_table.setStyle(TableStyle([
+        ('BOX', (0, 0), (-1, -1), 1, colors.black),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(meta_table)
+    story.append(Spacer(1, 6))
+
+    # 3. Items Table
+    item_rows = [[
+        Paragraph("<b>Sr.</b>", bold_style),
+        Paragraph("<b>Item Description</b>", bold_style),
+        Paragraph("<b>HSN Code</b>", bold_style),
+        Paragraph("<b>Qty</b>", bold_style),
+        Paragraph("<b>Rate (₹)</b>", bold_style),
+        Paragraph("<b>GST%</b>", bold_style),
+        Paragraph("<b>Amount (₹)</b>", bold_style)
+    ]]
+
+    for idx, itm in enumerate(inv_data['items']):
+        item_rows.append([
+            Paragraph(str(idx + 1), normal_style),
+            Paragraph(str(itm['desc']), normal_style),
+            Paragraph(str(itm['hsn']), normal_style),
+            Paragraph(f"{itm['qty']:.2f}", normal_style),
+            Paragraph(f"{itm['rate']:.2f}", normal_style),
+            Paragraph(f"{itm['gst_pct']}%", normal_style),
+            Paragraph(f"{itm['amount']:.2f}", normal_style)
+        ])
+
+    item_table = Table(item_rows, colWidths=[30, 220, 65, 45, 65, 50, 85])
+    item_table.setStyle(TableStyle([
+        ('BOX', (0, 0), (-1, -1), 1, colors.black),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.whitesmoke),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+    ]))
+    story.append(item_table)
+    story.append(Spacer(1, 6))
+
+    # 4. Bank Details & GST Summary
+    summary_left = f"""<b>Bank Details:</b><br/>{BANK_DETAILS}<br/><br/>
+    <b>Amount In Words:</b><br/><i>{inv_data['amt_in_words']}</i><br/><br/>
+    <b>Company's GSTIN:</b> {COMPANY_GSTIN}<br/>
+    <b>Company's PAN:</b> {COMPANY_PAN}
+    """
+
+    if inv_data['is_intrastate']:
+        tax_rows = f"""Sub Total: ₹{inv_data['sub_total']:.2f}<br/>
+        Trans. Charges: ₹{inv_data['trans_charges']:.2f}<br/>
+        CGST Amount: ₹{inv_data['cgst_amt']:.2f}<br/>
+        SGST Amount: ₹{inv_data['sgst_amt']:.2f}<br/>
+        <b>Grand Total: ₹{inv_data['grand_total']:.2f}</b>
+        """
+    else:
+        tax_rows = f"""Sub Total: ₹{inv_data['sub_total']:.2f}<br/>
+        Trans. Charges: ₹{inv_data['trans_charges']:.2f}<br/>
+        IGST Amount: ₹{inv_data['igst_amt']:.2f}<br/>
+        <b>Grand Total: ₹{inv_data['grand_total']:.2f}</b>
+        """
+
+    summary_table = Table([
+        [Paragraph(summary_left, normal_style), Paragraph(tax_rows, normal_style)]
+    ], colWidths=[360, 200])
+    
+    summary_table.setStyle(TableStyle([
+        ('BOX', (0, 0), (-1, -1), 1, colors.black),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(summary_table)
+    story.append(Spacer(1, 10))
+
+    # 5. Signatory Footer
+    sign_table = Table([
+        [Paragraph(f"<b>Company's Address:</b><br/>{COMPANY_ADDRESS}", normal_style),
+         Paragraph(f"<b>For, {COMPANY_NAME}</b><br/><br/><br/>Authorised Signatory", ParagraphStyle('RightSmall', parent=normal_style, alignment=2))]
+    ], colWidths=[320, 240])
+    story.append(sign_table)
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+# --- UI & NAVIGATION ---
 menu = st.sidebar.radio("Navigation", ["Create New Invoice", "Invoice Records & History"])
 
-# --- HEADER IMAGE / LOGO ---
-# To use your custom image header, place "header.png" in the same folder
 if os.path.exists("header.png"):
     st.image("header.png", use_container_width=True)
 else:
@@ -96,23 +231,23 @@ if menu == "Create New Invoice":
         st.caption(f"Due Date: **{due_date}**")
 
     with col2:
-        cust_name = st.text_input("Customer / Party Name")
-        cust_address = st.text_area("Customer Address")
-        cust_mobile = st.text_input("Customer Mobile No.")
+        cust_name = st.text_input("Customer / Party Name", value="")
+        cust_address = st.text_area("Customer Address", value="")
+        cust_mobile = st.text_input("Customer Mobile No.", value="")
 
     with col3:
-        cust_gstin = st.text_input("Party GSTIN No.")
-        cust_pan = st.text_input("Party PAN No.")
+        cust_gstin = st.text_input("Party GSTIN No.", value="")
+        cust_pan = st.text_input("Party PAN No.", value="")
         state_name = st.text_input("State Name", value="Gujarat")
         state_code = st.text_input("State Code", value="24")
 
     st.markdown("### 🚚 Transport & Logistics")
     t1, t2, t3, t4, t5 = st.columns(5)
-    with t1: transport = st.text_input("Transport")
-    with t2: lr_no = st.text_input("LR. No.")
+    with t1: transport = st.text_input("Transport", value="")
+    with t2: lr_no = st.text_input("LR. No.", value="")
     with t3: lr_date = st.date_input("LR. Date", value=date.today())
-    with t4: vehicle_no = st.text_input("Vehicle No.")
-    with t5: cases = st.text_input("Cases / Packages")
+    with t4: vehicle_no = st.text_input("Vehicle No.", value="")
+    with t5: cases = st.text_input("Cases / Packages", value="")
 
     st.markdown("### 📦 Item Details")
     num_items = st.number_input("Number of Items", min_value=1, max_value=20, value=1)
@@ -129,13 +264,11 @@ if menu == "Create New Invoice":
         item_amt = qty * rate
         items.append({"desc": desc, "hsn": hsn, "qty": qty, "rate": rate, "gst_pct": gst_pct, "amount": item_amt})
 
-    # Calculations
     taxable_amt = sum(item["amount"] for item in items)
     trans_charges = st.number_input("Transport Charges (₹)", min_value=0.0, value=0.0)
     sub_total = taxable_amt + trans_charges
 
-    # Intra-state (CGST + SGST) vs Inter-state (IGST)
-    is_intrastate = (state_code == "24")
+    is_intrastate = (str(state_code).strip() == "24")
     cgst_amt = sum((item["amount"] * (item["gst_pct"] / 200.0)) for item in items) if is_intrastate else 0.0
     sgst_amt = cgst_amt
     igst_amt = sum((item["amount"] * (item["gst_pct"] / 100.0)) for item in items) if not is_intrastate else 0.0
@@ -158,18 +291,59 @@ if menu == "Create New Invoice":
         st.metric(label="Grand Total", value=f"₹{grand_total:,.2f}")
         st.caption(f"**Amount in Words:** {amt_in_words}")
 
-    if st.button("💾 Save Invoice & Record", type="primary"):
-        record = {
-            "IN NO": inv_no,
-            "NAME": cust_name,
-            "AMOUNT": f"₹{grand_total:,.2f}",
-            "BILL DATE": bill_date.strftime("%m/%d/%Y"),
-            "DUE DATE": due_date.strftime("%m/%d/%Y"),
-            "PAID": "NO",
-            "TIME": pd.Timestamp.now().strftime("%m/%d/%Y %H:%M")
-        }
-        save_record(record)
-        st.success(f"Invoice #{inv_no} for {cust_name} has been saved successfully!")
+    # Prepare invoice payload
+    inv_payload = {
+        "inv_no": inv_no,
+        "bill_date": bill_date.strftime("%d/%m/%Y"),
+        "due_date": due_date.strftime("%d/%m/%Y"),
+        "term_days": term_days,
+        "cust_name": cust_name,
+        "cust_address": cust_address,
+        "cust_mobile": cust_mobile,
+        "cust_gstin": cust_gstin,
+        "cust_pan": cust_pan,
+        "state_name": state_name,
+        "state_code": state_code,
+        "transport": transport,
+        "lr_no": lr_no,
+        "lr_date": lr_date.strftime("%d/%m/%Y"),
+        "vehicle_no": vehicle_no,
+        "cases": cases,
+        "items": items,
+        "sub_total": sub_total,
+        "trans_charges": trans_charges,
+        "is_intrastate": is_intrastate,
+        "cgst_amt": cgst_amt,
+        "sgst_amt": sgst_amt,
+        "igst_amt": igst_amt,
+        "grand_total": grand_total,
+        "amt_in_words": amt_in_words
+    }
+
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("💾 Save to Records", type="primary", use_container_width=True):
+            record = {
+                "IN NO": inv_no,
+                "NAME": cust_name,
+                "AMOUNT": f"₹{grand_total:,.2f}",
+                "BILL DATE": bill_date.strftime("%m/%d/%Y"),
+                "DUE DATE": due_date.strftime("%m/%d/%Y"),
+                "PAID": "NO",
+                "TIME": pd.Timestamp.now().strftime("%m/%d/%Y %H:%M")
+            }
+            save_record(record)
+            st.success(f"Invoice #{inv_no} recorded successfully!")
+
+    with b2:
+        pdf_bytes = generate_pdf_invoice(inv_payload)
+        st.download_button(
+            label="📥 Download Invoice PDF",
+            data=pdf_bytes,
+            file_name=f"Invoice_{inv_no}_{cust_name if cust_name else 'Draft'}.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
 
 elif menu == "Invoice Records & History":
     st.subheader("📑 Invoice History Ledger")
